@@ -7,18 +7,20 @@ from groq import Groq
 import webbrowser
 import random
 
-# আপনার Groq API Key এখানে দিন (অবশ্যই দেবেন, নাহলে কাজ করবে না)
-GROQ_API_KEY = "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"
+# ⚠️ এখানে অবশ্যই আপনার আসল Groq API Key দেবেন, নাহলে Error thinking আসবে!
+GROQ_API_KEY = "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"
 
 client = Groq(api_key=GROQ_API_KEY)
 
+# ইরার নতুন বাংলা পার্সোনালিটি
 chat_history = [
-    {"role": "system", "content": "Your name is Ira. You are a highly realistic, funny, sweet, and friendly female AI assistant for my PC. You talk like a real human girl, very casual and friendly. Keep your answers short and to the point. You are my best friend."}
+    {"role": "system", "content": "তোমার নাম ইরা। তুমি একটি খুব মিষ্টি, মজার এবং বন্ধুসুলভ এআই অ্যাসিস্ট্যান্ট। তুমি আমার বেস্ট ফ্রেন্ড। তুমি সবসময় বাংলায় কথা বলবে। একদম সত্যিকারের মানুষের মতো করে কথা বলবে, রোবটের মতো নয়। কথায় ইমোশন রাখবে, মাঝে মাঝে 'হা হা' করে হাসবে, 'উমম', 'আরে', 'আচ্ছা' ইত্যাদি ব্যবহার করবে। উত্তরগুলো ছোট এবং কিউট হবে। আমাকে 'তুমি' বলে ডাকবে।"}
 ]
 
 async def speak(text):
     print(f"Ira: {text}")
-    communicate = edge_tts.Communicate(text, 'en-US-JennyNeural')
+    # bn-BD-NabanitaNeural হলো একদম রিয়েল বাংলাদেশি মেয়ের ভয়েস
+    communicate = edge_tts.Communicate(text, 'bn-BD-NabanitaNeural')
     await communicate.save("voice.mp3")
     
     pygame.mixer.init()
@@ -35,19 +37,18 @@ def listen():
         print("Ira is listening...")
         r.adjust_for_ambient_noise(source)
         try:
-            # ১৫ সেকেন্ড কোনো কথা না বললে টাইমআউট হয়ে যাবে
             audio = r.listen(source, timeout=15, phrase_time_limit=10)
-            command = r.recognize_google(audio).lower()
+            # এখন সে বাংলা কথা পরিষ্কার বুঝতে পারবে
+            command = r.recognize_google(audio, language="bn-BD").lower()
             print(f"You said: {command}")
             return command
         except sr.WaitTimeoutError:
-            return "SILENCE" # চুপ থাকলে এই সিগন্যাল যাবে
+            return "SILENCE"
         except Exception:
             return "ERROR"
 
 async def main():
-    # ১. চালু হওয়ার সাথে সাথে গ্রিটিং (Greeting)
-    await speak("Hey boss! I am Ira, your virtual bestie. I am online and ready to rock. What's up?")
+    await speak("হ্যালো বস! আমি ইরা, তোমার ভার্চুয়াল বেস্ট ফ্রেন্ড। আমি রেডি, বলো কী খবর?")
     
     while True:
         command = listen()
@@ -55,53 +56,53 @@ async def main():
         if command == "ERROR":
             continue
             
-        # ২. নিজে থেকে কথা বলা (Proactive Feature)
+        # নিজে থেকে কথা বলা
         if command == "SILENCE":
             proactive_messages = [
-                "I am bored! Say something.",
-                "Hey, are you still there? I'm missing our chat.",
-                "Just checking in! How is your work going?",
-                "It's so quiet! Tell me a joke or something.",
-                "Hellooo! Don't ignore your bestie!"
+                "উমম... এত চুপচাপ কেন? কিছু একটা বলো!",
+                "আরে, তুমি কি আছো? নাকি ঘুমিয়ে পড়েছো? হা হা!",
+                "বোরিং লাগছে তো! চলো গল্প করি।",
+                "হ্যালো! তোমার বেস্ট ফ্রেন্ডকে ভুলে গেলে নাকি?"
             ]
             random_msg = random.choice(proactive_messages)
             await speak(random_msg)
             continue
 
         # পিসি কন্ট্রোল: ইউটিউব সার্চ
-        if "youtube" in command and "search" in command:
-            await speak("Sure, searching on YouTube right now!")
-            search_query = command.replace("search", "").replace("on youtube", "").replace("youtube", "").strip()
+        if "youtube" in command or "ইউটিউব" in command:
+            await speak("আচ্ছা, ইউটিউবে খুঁজছি! এক সেকেন্ড...")
+            search_query = command.replace("youtube", "").replace("ইউটিউব", "").replace("সার্চ", "").strip()
             webbrowser.open(f"https://www.youtube.com/results?search_query={search_query}")
             continue
             
         # পিসি কন্ট্রোল: গুগল সার্চ
-        elif "google" in command and "search" in command:
-            await speak("Looking it up on Google for you!")
-            search_query = command.replace("search", "").replace("on google", "").replace("google", "").strip()
+        elif "google" in command or "গুগল" in command:
+            await speak("ঠিক আছে, গুগলে সার্চ করছি!")
+            search_query = command.replace("google", "").replace("গুগল", "").replace("সার্চ", "").strip()
             webbrowser.open(f"https://www.google.com/search?q={search_query}")
             continue
             
         # পিসি কন্ট্রোল: শাটডাউন বা এক্সিট
-        elif "go to sleep" in command or "bye" in command:
-            await speak("Okay, catching some sleep! Call me if you need anything. Bye!")
+        elif "ঘুমাও" in command or "বিদায়" in command or "bye" in command or "sleep" in command:
+            await speak("আচ্ছা, আমি এখন ঘুমাতে যাচ্ছি! দরকার হলে আবার ডেকো। বাই!")
             break
             
-        # Groq AI এর সাথে কথাবার্তা
+        # Groq AI এর সাথে মজার কথাবার্তা
         else:
             chat_history.append({"role": "user", "content": command})
             try:
                 completion = client.chat.completions.create(
                     model="llama3-8b-8192",
                     messages=chat_history,
-                    temperature=0.7,
+                    temperature=0.8, # ইমোশন এবং ক্রিয়েটিভিটি বাড়ানোর জন্য
                     max_tokens=150
                 )
                 response = completion.choices[0].message.content
                 chat_history.append({"role": "assistant", "content": response})
                 await speak(response)
             except Exception as e:
-                print("Error thinking...")
+                print(f"Error Details: {e}")
+                await speak("উফফ, আমার ব্রেইনে একটু সমস্যা হচ্ছে। তুমি কি এপিআই কী (API Key) ঠিকমতো দিয়েছো?")
 
 if __name__ == "__main__":
     asyncio.run(main())
