@@ -1,8 +1,12 @@
 @echo off
-title Ira AI Assistant
 echo Starting Ira AI from GitHub...
 
-powershell -Command "Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/raihan6962-coder/IRA-AI/main/ira.py?v=%random%' -OutFile 'ira.py'"
+:: নিচে আপনার GitHub raw link বসান (কোটেশনের ভেতরে)
+set "RAW_LINK=YOUR_RAW_GITHUB_LINK_HERE"
+
+:: cache-busting যাতে সবসময় সর্বশেষ কোড আসে
+curl -s -o ira.py "%RAW_LINK%?v=%random%"
+
 python ira.py
 del ira.py
 pause
