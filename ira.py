@@ -92,7 +92,7 @@ async def main():
             chat_history.append({"role": "user", "content": command})
             try:
                 completion = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
+                    model="llama3-8b-8192",
                     messages=chat_history,
                     temperature=0.8, # ইমোশন এবং ক্রিয়েটিভিটি বাড়ানোর জন্য
                     max_tokens=150
