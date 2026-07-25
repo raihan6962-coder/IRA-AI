@@ -1,102 +1,151 @@
 import os
+import sys
+import tempfile
+import webbrowser
+import random
+from groq import Groq
 import speech_recognition as sr
 import edge_tts
 import pygame
 import asyncio
-from groq import Groq
-import webbrowser
-import random
+from dotenv import load_dotenv
 
-# ⚠️ আপনার আসল Groq API Key এখানে দিন
-GROQ_API_KEY = "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"
+load_dotenv()
 
-client = Groq(api_key=GROQ_API_KEY)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# ইরার নতুন ইমোশনাল এবং রিয়েলিস্টিক পার্সোনালিটি
-chat_history = [
-    {"role": "system", "content": "তোমার নাম ইরা। তুমি আমার বেস্ট ফ্রেন্ড। তুমি সবসময় বাংলায় কথা বলবে, তবে একদম আড্ডার ভাষায় (Casual/Informal), কোনোভাবেই বইয়ের ভাষায় বা রোবটের মতো নয়। কথা বলার সময় প্রচুর ইমোশন দেখাবে। বাক্যের মাঝে কমা (,) ব্যবহার করবে যাতে গলার স্বরে পজ (pause) আসে এবং রিয়েলিস্টিক শোনায়। মাঝে মাঝে 'আরে!', 'উমম...', 'হাহা', 'ধুর!' এই ধরনের শব্দ ব্যবহার করবে। উত্তর খুব ছোট রাখবে, ১-২ লাইনের মধ্যে।"}
+PROACTIVE_MSGS = [
+    "আরে! কথা বলো না কেনো? একদম চুপ করে আছো কেনো!",
+    "উমম... মনে হচ্ছে তুমি খুব ব্যস্ত! কিছু বলবে?",
+    "হাহা, আমি তো বিরক্ত হয়ে গেলাম! একটু আড্ডা দাও না!",
+    "ধুর! এত চুপচাপ কেনো? বলো কী খবর!",
+    "আরে বন্ধু! আমি তো বসে বসে একঘেয়েমে পড়ে গেলাম! কিছু বলো!",
+    "কী ব্যাপার? আজকে এত চুপচাপ কেনো? অসুস্থ নাকি?",
 ]
 
-async def speak(text):
-    print(f"Ira: {text}")
-    # edge-tts এর ভয়েস রেট একটু ফাস্ট করে দিলাম যাতে ন্যাচারাল শোনায় (+5%)
-    communicate = edge_tts.Communicate(text, 'bn-BD-NabanitaNeural', rate='+5%')
-    await communicate.save("voice.mp3")
-    
-    pygame.mixer.init()
-    pygame.mixer.music.load("voice.mp3")
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        pygame.time.Clock().tick(10)
-    pygame.mixer.quit()
-    os.remove("voice.mp3")
 
-def listen():
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        print("Ira is listening...")
-        r.adjust_for_ambient_noise(source)
+class IraAI:
+    def __init__(self):
+        if not GROQ_API_KEY:
+            print("এরে! API key টা দিতে ভুলে গেছো! .env ফাইলে বসাও আগে!")
+            sys.exit(1)
+        self.client = Groq(api_key=GROQ_API_KEY)
+        self.recognizer = sr.Recognizer()
+        self.recognizer.pause_threshold = 1.0
+        self.is_running = True
+        pygame.mixer.init()
+
+    def speak(self, text):
+        voice = "bn-BD-NabanitaNeural"
+        rate = "+5%"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+            cache_path = f.name
         try:
-            audio = r.listen(source, timeout=15, phrase_time_limit=10)
-            command = r.recognize_google(audio, language="bn-BD").lower()
-            print(f"You said: {command}")
-            return command
-        except sr.WaitTimeoutError:
-            return "SILENCE"
-        except Exception:
-            return "ERROR"
+            tts = edge_tts.Communicate(text, voice, rate=rate)
+            asyncio.run(tts.save(cache_path))
+            pygame.mixer.music.load(cache_path)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)
+            pygame.mixer.music.unload()
+        except Exception as e:
+            print(f"Speech error: {e}")
+        finally:
+            if os.path.exists(cache_path):
+                os.unlink(cache_path)
 
-async def main():
-    await speak("আরে হ্যালো! আমি ইরা, তোমার বেস্ট ফ্রেন্ড। আমি রেডি, বলো কী খবর তোমার?")
-    
-    while True:
-        command = listen()
-        
-        if command == "ERROR":
-            continue
-            
-        if command == "SILENCE":
-            proactive_messages = [
-                "উমম..., এত চুপচাপ কেন? কিছু একটা বলো!",
-                "আরে, তুমি কি আছো? নাকি ঘুমিয়ে পড়েছো? হাহা!",
-                "বোরিং লাগছে তো! চলো, গল্প করি।"
-            ]
-            random_msg = random.choice(proactive_messages)
-            await speak(random_msg)
-            continue
-
-        if "youtube" in command or "ইউটিউব" in command:
-            await speak("আচ্ছা, ইউটিউবে খুঁজছি! এক সেকেন্ড...")
-            search_query = command.replace("youtube", "").replace("ইউটিউব", "").replace("সার্চ", "").strip()
-            webbrowser.open(f"https://www.youtube.com/results?search_query={search_query}")
-            continue
-            
-        elif "google" in command or "গুগল" in command:
-            await speak("ঠিক আছে, গুগলে সার্চ করছি!")
-            search_query = command.replace("google", "").replace("গুগল", "").replace("সার্চ", "").strip()
-            webbrowser.open(f"https://www.google.com/search?q={search_query}")
-            continue
-            
-        elif "ঘুমাও" in command or "বিদায়" in command or "bye" in command or "sleep" in command:
-            await speak("আচ্ছা, আমি এখন ঘুমাতে যাচ্ছি! দরকার হলে আবার ডেকো, বাই!")
-            break
-            
-        else:
-            chat_history.append({"role": "user", "content": command})
+    def listen(self, timeout=15, phrase_limit=10):
+        with sr.Microphone() as source:
+            self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            print("শুনছি...")
             try:
-                # এখানে মডেলের নাম আপডেট করা হয়েছে (llama-3.1-8b-instant)
-                completion = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
-                    messages=chat_history,
-                    temperature=0.8, 
-                    max_tokens=150
-                )
-                response = completion.choices[0].message.content
-                chat_history.append({"role": "assistant", "content": response})
-                await speak(response)
+                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_limit)
+                text = self.recognizer.recognize_google(audio, language="bn-BD")
+                print(f"তুমি বললে: {text}")
+                return text.lower()
+            except sr.WaitTimeoutError:
+                return "__TIMEOUT__"
+            except sr.UnknownValueError:
+                return None
+            except sr.RequestError as e:
+                print(f"STT error: {e}")
+                return None
             except Exception as e:
-                print(f"Error Details: {e}")
-                await speak("উফফ, আমার ব্রেইনে একটু সমস্যা হচ্ছে। এপিআই কী-টা একটু চেক করবে?")
+                print(f"Error: {e}")
+                return None
+
+    def chat(self, message):
+        try:
+            response = self.client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "তুমি হচ্ছো 'ইরা', আমার সেরা বন্ধু। "
+                            "তুমি শুধুমাত্র বাংলায় (বাংলাদেশ) কথা বলবে। "
+                            "তোমার কথা বলার ধরন হবে পুরোপুরি ক্যাজুয়াল আর আড্ডার মতো। "
+                            "প্রতিটি উত্তর শুরুতে বা মাঝে আরে, উমম, হাহা, ধুর, আরে বাবা, ওহ, থাম্বস ধরণের ফিলার শব্দ ব্যবহার করবে। "
+                            "বাক্যের মাঝে কমা (,) ব্যবহার করে প্রাকৃতিক বিরতি দেবে। "
+                            "উত্তরগুলো খুব ছোট হবে, মাত্র ১-২ লাইন। "
+                            "বন্ধুর মতো স্বাভাবিক, হাসিখুশি, আর মজার টোনে কথা বলবে। "
+                            "কখনো রোবটের মতো শোনাবে না, পুরো হিউম্যান ফিল দেবে।"
+                        ),
+                    },
+                    {"role": "user", "content": message},
+                ],
+                max_tokens=100,
+                temperature=0.8,
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            error_msg = (
+                "আরে বাবা! আমার ব্রেনটা একটু খারাপ করছে মনে হয়! "
+                "একটু পর আবার চেষ্টা করো, দোস্ত!"
+            )
+            print(f"Groq error: {e}")
+            return error_msg
+
+    def process_command(self, command):
+        if not command:
+            return
+        if "search on youtube" in command or "ইউটিউবে সার্চ" in command:
+            query = command.replace("search on youtube", "").replace("ইউটিউবে সার্চ", "").strip()
+            if query:
+                webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
+                self.speak(f"ইউটিউবে {query} সার্চ দিচ্ছি, একটু অপেক্ষা করো!")
+        elif "search on google" in command or "গুগলে সার্চ" in command:
+            query = command.replace("search on google", "").replace("গুগলে সার্চ", "").strip()
+            if query:
+                webbrowser.open(f"https://www.google.com/search?q={query}")
+                self.speak(f"গুগলে {query} খুঁজছি, এই দেখো!")
+        elif "go to sleep" in command or "sleep" in command or "ঘুম" in command:
+            self.is_running = False
+            self.speak("আচ্ছা তাহলে! আমি ঘুমাতে যাচ্ছি! পরে দেখা হবে, বাই বাই!")
+            self.cleanup()
+        else:
+            response = self.chat(command)
+            self.speak(response)
+
+    def cleanup(self):
+        pygame.mixer.quit()
+        sys.exit(0)
+
+    def run(self):
+        print("ইরা রেডি! বলো কী বলবে!")
+        while self.is_running:
+            try:
+                command = self.listen()
+                if command == "__TIMEOUT__":
+                    msg = random.choice(PROACTIVE_MSGS)
+                    self.speak(msg)
+                elif command:
+                    self.process_command(command)
+            except KeyboardInterrupt:
+                self.speak("আচ্ছা, ঠিক আছে! পরে কথা হবে!")
+                self.is_running = False
+                self.cleanup()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    IraAI().run()
