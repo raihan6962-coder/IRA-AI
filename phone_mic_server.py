@@ -1,34 +1,19 @@
 """
 Phone Mic Server for Ira AI
-============================
-Your phone acts as Ira's microphone over WiFi.
-Run this, open the URL on your phone, and talk!
+Your phone = Ira's microphone over WiFi.
+No Flask needed - uses Python's built-in HTTP server.
 """
 
-import os
-import sys
-import re
-import json
-import base64
-import tempfile
-import webbrowser
-import time
-import math
-import threading
-import socket
+import os, sys, json, base64, tempfile, webbrowser, socket, wave
+import io
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from groq import Groq
 import speech_recognition as sr
 import edge_tts
 import pygame
 import asyncio
 from datetime import datetime
-
-# ====== TRY TO IMPORT FLASK ======
-try:
-    from flask import Flask, request, jsonify, send_from_directory
-    HAS_FLASK = True
-except ImportError:
-    HAS_FLASK = False
+from urllib.parse import urlparse
 
 # ====== LOAD ENV ======
 def load_env():
@@ -51,41 +36,23 @@ WAKE_WORDS = ["ira", "ইরা", "আইরা"]
 GOODBYE_WORDS = ["sleep", "ঘুম", "bye", "বাই", "বিদায়", "থাম", "stop"]
 SEARCH_YOUTUBE = ["youtube", "ইউটিউব"]
 SEARCH_GOOGLE = ["google", "গুগল"]
-
-STATUS_SLEEP = 0
-STATUS_LISTEN = 1
-STATUS_THINK = 2
-STATUS_SPEAK = 3
-
-# ====== SHARED IRA ENGINE ======
 chat_history = []
 
 
 def log(msg, type_="INFO"):
     t = datetime.now().strftime("%H:%M:%S")
-    symbol = {"INFO": "•", "USER": "»", "IRA": "«", "SYS": "◆", "ERR": "✗"}
-    s = symbol.get(type_, "•")
+    s = {"INFO": "•", "USER": "»", "IRA": "«", "SYS": "◆", "ERR": "✗"}.get(type_, "•")
     print(f" {t} {s} {msg}")
 
 
-def get_ira_reply(msg):
+def get_reply(msg):
     global chat_history
     chat_history.append({"role": "user", "content": msg})
-    system = (
-        "তুমি ইরা। তুমি আমার বন্ধু। খুব ছোট করে উত্তর দাও, মাত্র ১ লাইন। "
-        "সবসময় বাংলায় বলো। স্বাভাবিক, ক্যাজুয়াল টোনে বলো। "
-        "প্রতিবার উত্তরের শুরুতে একটি ফিলার শব্দ দাও: আরে, উমম, হাহা, ধুর, আচ্ছা, ওহ।"
-    )
-    msgs = [{"role": "system", "content": system}]
-    msgs.extend(chat_history[-10:])
+    system = "তুমি ইরা। তুমি আমার বন্ধু। খুব ছোট করে উত্তর দাও, মাত্র ১ লাইন। সবসময় বাংলায় বলো। স্বাভাবিক, ক্যাজুয়াল টোনে বলো। প্রতিবার উত্তরের শুরুতে একটি ফিলার শব্দ দাও: আরে, উমম, হাহা, ধুর, আচ্ছা, ওহ।"
+    msgs = [{"role": "system", "content": system}] + chat_history[-10:]
     try:
         client = Groq(api_key=GROQ_API_KEY)
-        resp = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=msgs,
-            max_tokens=80,
-            temperature=0.7,
-        )
+        resp = client.chat.completions.create(model="llama-3.1-8b-instant", messages=msgs, max_tokens=80, temperature=0.7)
         reply = resp.choices[0].message.content.strip()
         chat_history.append({"role": "assistant", "content": reply})
         return reply
@@ -100,8 +67,7 @@ def speak(text):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
         path = f.name
     try:
-        tts = edge_tts.Communicate(text, "bn-BD-NabanitaNeural", rate="+0%")
-        asyncio.run(tts.save(path))
+        asyncio.run(edge_tts.Communicate(text, "bn-BD-NabanitaNeural", rate="+0%").save(path))
         pygame.mixer.music.load(path)
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
@@ -110,43 +76,37 @@ def speak(text):
     except Exception as e:
         log(f"Speech error: {e}", "ERR")
     finally:
-        if os.path.exists(path):
-            os.unlink(path)
+        if os.path.exists(path): os.unlink(path)
     pygame.mixer.quit()
 
 
-def process_audio_file(wav_path):
-    """Take a WAV file, run STT, get Ira reply, speak it."""
-    recognizer = sr.Recognizer()
-    with sr.AudioFile(wav_path) as source:
-        audio = recognizer.record(source)
+def process_audio(wav_bytes):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+        tmp = f.name
+        f.write(wav_bytes)
     try:
-        text = recognizer.recognize_google(audio, language="bn-BD").lower().strip()
-        log(text, "USER")
-    except sr.UnknownValueError:
+        r = sr.Recognizer()
+        with sr.AudioFile(tmp) as src:
+            audio = r.record(src)
         try:
-            text = recognizer.recognize_google(audio, language="en-US").lower().strip()
-            log(text, "USER")
+            text = r.recognize_google(audio, language="bn-BD").lower().strip()
         except:
-            return "আমি তোমার কথা শুনতে পাইনি! আরেকটু জোরে বলো!"
+            text = r.recognize_google(audio, language="en-US").lower().strip()
+        log(text, "USER")
     except Exception as e:
-        return f"STT error: {e}"
+        return "আমি শুনতে পাইনি! আরেকটু জোরে বলো!"
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
 
     if not text:
-        return "আমি তোমার কথা শুনতে পাইনি! আরেকটু জোরে বলো!"
+        return "আমি শুনতে পাইনি! আরেকটু জোরে বলো!"
 
-    found_wake = False
     rest = text
     for w in WAKE_WORDS:
         if w in text:
             idx = text.index(w) + len(w)
             rest = text[idx:].strip().lstrip(" ,!?।")
-            found_wake = True
             break
-
-    if not found_wake:
-        # Without wake word, still respond (phone mode is always active)
-        rest = text
 
     if not rest:
         return "হুম, বলো! শুনছি!"
@@ -156,8 +116,7 @@ def process_audio_file(wav_path):
 
     if any(w in rest for w in SEARCH_YOUTUBE):
         q = rest
-        for w in SEARCH_YOUTUBE + ["search", "সার্চ", "খুঁজ"]:
-            q = q.replace(w, "")
+        for w in SEARCH_YOUTUBE + ["search", "সার্চ", "খুঁজ"]: q = q.replace(w, "")
         q = q.strip()
         if q:
             webbrowser.open(f"https://www.youtube.com/results?search_query={q}")
@@ -165,212 +124,260 @@ def process_audio_file(wav_path):
 
     if any(w in rest for w in SEARCH_GOOGLE):
         q = rest
-        for w in SEARCH_GOOGLE + ["search", "সার্চ", "খুঁজ"]:
-            q = q.replace(w, "")
+        for w in SEARCH_GOOGLE + ["search", "সার্চ", "খুঁজ"]: q = q.replace(w, "")
         q = q.strip()
         if q:
             webbrowser.open(f"https://www.google.com/search?q={q}")
             return f"গুগলে {q} খুঁজছি!"
 
-    return get_ira_reply(rest)
+    return get_reply(rest)
 
 
-# ====== FLASK WEB SERVER ======
-HTML_PAGE = """<!DOCTYPE html>
+HTML = """<!DOCTYPE html>
 <html lang="bn">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
 <title>Ira Phone Mic</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:sans-serif;background:#1a1a2e;color:#fff;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:20px}
-h1{color:#0f0;margin:20px 0;font-size:24px}
-.status{background:#16213e;padding:15px;border-radius:12px;width:100%;max-width:400px;margin:10px 0;text-align:center;font-size:14px}
-.status .dot{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px;vertical-align:middle}
-.dot.green{background:#0f0;box-shadow:0 0 10px #0f0}
-.dot.red{background:#f00;box-shadow:0 0 10px #f00}
-.dot.blue{background:#00f;box-shadow:0 0 10px #00f}
-.btn{padding:20px;border:none;border-radius:50%;font-size:18px;cursor:pointer;margin:15px;width:80px;height:80px;transition:.3s}
-.btn.record{background:#e94560;color:#fff}
-.btn.record.recording{background:#f00;animation:pulse 1s infinite}
-.btn.send{background:#0f3460;color:#fff;width:auto;border-radius:25px;padding:12px 30px}
-@keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.1)}100%{transform:scale(1)}}
-.response{background:#16213e;padding:15px;border-radius:12px;width:100%;max-width:400px;margin:10px 0;font-size:16px;line-height:1.6;display:none}
+body{background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;padding:20px;min-height:100vh;display:flex;flex-direction:column;align-items:center}
+.circle{width:80px;height:80px;border-radius:50%;background:radial-gradient(circle,#0f0,#060);margin:25px auto;animation:glow 2s infinite}
+@keyframes glow{0%{box-shadow:0 0 10px #0f0}50%{box-shadow:0 0 30px #0f0}100%{box-shadow:0 0 10px #0f0}}
+h1{font-size:22px;margin:10px 0;color:#0f0}
+.status{background:#1a1a2e;border-radius:10px;padding:12px 20px;margin:10px;font-size:14px;width:100%;max-width:350px}
+.rec-btn{width:90px;height:90px;border-radius:50%;border:none;font-size:40px;cursor:pointer;margin:20px;background:#e94560;color:#fff;transition:all .3s;box-shadow:0 0 15px rgba(233,69,96,.5)}
+.rec-btn.recording{background:#f00;animation:pulse .8s infinite;box-shadow:0 0 25px #f00}
+@keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.12)}100%{transform:scale(1)}}
+.send-btn{background:#0f3460;color:#fff;border:none;border-radius:25px;padding:14px 40px;font-size:16px;cursor:pointer;margin:10px;transition:.3s}
+.send-btn:disabled{opacity:.4;cursor:default}
+.send-btn:not(:disabled):hover{background:#1a5276}
+.response{background:#1a1a2e;border-radius:10px;padding:15px;margin:15px;font-size:15px;line-height:1.6;width:100%;max-width:350px;display:none}
 .response.show{display:block}
-.hint{color:#888;font-size:12px;margin-top:20px;text-align:center}
-#timer{font-size:14px;color:#888;margin:5px 0}
-.logo{width:60px;height:60px;border-radius:50%;background:linear-gradient(135deg,#0f0,#0ff);margin:10px;animation:glow 2s infinite}
-@keyframes glow{0%{box-shadow:0 0 5px #0f0}50%{box-shadow:0 0 20px #0f0}100%{box-shadow:0 0 5px #0f0}}
+#timer{font-size:13px;color:#888;margin:5px}
+.ip{font-size:12px;color:#666;margin-top:20px}
 </style>
 </head>
 <body>
-<div class="logo"></div>
-<h1>🗣️ Ira Phone Mic</h1>
-<div class="status"><span class="dot green" id="statusDot"></span><span id="statusText">Ready! Press record and talk</span></div>
-<div id="timer">00:00</div>
-<button class="btn record" id="recordBtn">🎤</button>
-<button class="btn send" id="sendBtn" disabled>Send to Ira →</button>
-<div class="response" id="responseBox"></div>
-<div class="hint">Press 🎤 to record → Press Send → Ira replies on PC!</div>
+<div class="circle"></div>
+<h1>Ira Phone Mic</h1>
+<div class="status" id="status">🎤 Press the button & talk</div>
+<div id="timer">0s</div>
+<button class="rec-btn" id="recBtn">🎤</button>
+<button class="send-btn" id="sendBtn" disabled>Send to Ira</button>
+<div class="response" id="resp"></div>
+<div class="ip" id="ipInfo"></div>
 <script>
-let mediaRecorder,audioChunks=[],recording=false,startTime;
-const recordBtn=document.getElementById('recordBtn');
+let recOn=false, startTime, audioCtx, samples=[];
+const recBtn=document.getElementById('recBtn');
 const sendBtn=document.getElementById('sendBtn');
-const statusText=document.getElementById('statusText');
-const statusDot=document.getElementById('statusDot');
-const responseBox=document.getElementById('responseBox');
+const status=document.getElementById('status');
+const resp=document.getElementById('resp');
 const timer=document.getElementById('timer');
+const ipInfo=document.getElementById('ipInfo');
+ipInfo.textContent='Server: '+window.location.hostname+':'+window.location.port;
 
-recordBtn.onclick=async()=>{
-    if(recording){
-        mediaRecorder.stop();
-        recording=false;
-        recordBtn.classList.remove('recording');
-        recordBtn.textContent='🎤';
-        statusDot.className='dot green';
-        statusText.textContent='Recorded! Press Send →';
+function encodeWAV(samples, sr){
+    const len=samples.length, buf=new ArrayBuffer(44+len*2);
+    const dv=new DataView(buf);
+    function wStr(o,s){for(let i=0;i<s.length;i++)dv.setUint8(o+i,s.charCodeAt(i));}
+    wStr(0,'RIFF');dv.setUint32(4,36+len*2,true);wStr(8,'WAVE');
+    wStr(12,'fmt ');dv.setUint32(16,16,true);dv.setUint16(20,1,true);
+    dv.setUint16(22,1,true);dv.setUint32(24,sr,true);dv.setUint32(28,sr*2,true);
+    dv.setUint16(32,2,true);dv.setUint16(34,16,true);wStr(36,'data');
+    dv.setUint32(40,len*2,true);
+    for(let i=0;i<len;i++){
+        const s=Math.max(-1,Math.min(1,samples[i]));
+        dv.setInt16(44+i*2,s<0?s*0x8000:s*0x7FFF,true);
+    }
+    return new Blob([buf],{type:'audio/wav'});
+}
+
+recBtn.onclick=async()=>{
+    if(recOn){
+        recOn=false;
+        recBtn.classList.remove('recording');
+        recBtn.textContent='🎤';
+        status.textContent='✅ Recorded! Press "Send to Ira"';
+        if(audioCtx)audioCtx.close();
         return;
     }
     try{
-        const stream=await navigator.mediaDevices.getUserMedia({audio:{
-            sampleRate:16000,
-            channelCount:1,
-            echoCancellation:true,
-            noiseSuppression:true
-        }});
-        mediaRecorder=new MediaRecorder(stream,{mimeType:'audio/webm'});
-        audioChunks=[];
-        mediaRecorder.ondataavailable=e=>audioChunks.push(e.data);
-        mediaRecorder.onstop=()=>{
-            stream.getTracks().forEach(t=>t.stop());
-            const blob=new Blob(audioChunks,{type:'audio/webm'});
-            window._audioBlob=blob;
-            sendBtn.disabled=false;
+        const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+        audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+        const src=audioCtx.createMediaStreamSource(stream);
+        const node=audioCtx.createScriptProcessor(4096,1,1);
+        samples=[];
+        node.onaudioprocess=e=>{
+            const ch=e.inputBuffer.getChannelData(0);
+            for(let i=0;i<ch.length;i++)samples.push(ch[i]);
         };
-        mediaRecorder.start();
-        recording=true;
-        recordBtn.classList.add('recording');
-        recordBtn.textContent='⏹️';
-        statusDot.className='dot red';
-        statusText.textContent='Recording... speak now!';
+        src.connect(node);node.connect(audioCtx.destination);
+        recOn=true;
+        recBtn.classList.add('recording');
+        recBtn.textContent='⏹';
+        status.textContent='🔴 Recording... Speak now!';
         startTime=Date.now();
-        const updateTimer=()=>{
-            if(!recording)return;
-            const s=Math.floor((Date.now()-startTime)/1000);
-            timer.textContent=`00:${s.toString().padStart(2,'0')}`;
-            requestAnimationFrame(updateTimer);
-        };
-        updateTimer();
-    }catch(e){
-        statusText.textContent='Error: '+e.message;
-    }
+        function update(){if(!recOn)return;timer.textContent=Math.floor((Date.now()-startTime)/1000)+'s';requestAnimationFrame(update)}
+        update();
+    }catch(e){status.textContent='❌ Mic error: '+e.message;}
 };
 
 sendBtn.onclick=async()=>{
-    const blob=window._audioBlob;
-    if(!blob)return;
-    sendBtn.disabled=true;
-    sendBtn.textContent='Sending...';
-    statusDot.className='dot blue';
-    statusText.textContent='Ira is thinking...';
-    const form=new FormData();
-    form.append('audio',blob,'recording.webm');
-    try{
-        const resp=await fetch('/upload',{method:'POST',body:form});
-        const data=await resp.json();
-        if(data.reply==='__GOODBYE__'){
-            statusText.textContent='Ira went to sleep. Bye!';
-            responseBox.textContent='😴 Ira gone to sleep!';
-            responseBox.className='response show';
-            return;
-        }
-        statusDot.className='dot green';
-        statusText.textContent='Ira replied!';
-        responseBox.textContent='🤖 Ira: '+data.reply;
-        responseBox.className='response show';
-    }catch(e){
-        statusText.textContent='Error! Check PC connection';
-        responseBox.textContent='❌ Connection error: '+e.message;
-        responseBox.className='response show';
-    }
-    sendBtn.textContent='Send to Ira →';
-    sendBtn.disabled=false;
-    timer.textContent='00:00';
+    if(!samples.length)return;
+    if(recOn){recOn=false;if(audioCtx)audioCtx.close();recBtn.classList.remove('recording');recBtn.textContent='🎤';}
+    sendBtn.disabled=true;sendBtn.textContent='Sending...';
+    status.textContent='⏳ Ira is thinking...';
+    const wav=encodeWAV(samples,audioCtx?audioCtx.sampleRate:16000);
+    const reader=new FileReader();
+    reader.onload=async()=>{
+        const b64=reader.result.split(',')[1];
+        try{
+            const r=await fetch('/upload',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({audio:b64})
+            });
+            const d=await r.json();
+            if(d.reply==='__GOODBYE__'){status.textContent='😴 Bye!';resp.textContent='😴 Ira gone to sleep!';resp.className='response show';return;}
+            status.textContent='💬 Ira replied!';
+            resp.textContent='🤖 '+d.reply;
+            resp.className='response show';
+        }catch(e){status.textContent='❌ Connection error!';resp.textContent='Error: '+e.message;resp.className='response show';}
+        sendBtn.textContent='Send to Ira';sendBtn.disabled=false;
+        timer.textContent='0s';
+    };
+    reader.readAsDataURL(wav);
 };
 </script>
 </body>
 </html>"""
 
 
-def create_app():
-    app = Flask(__name__)
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(HTML.encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-    @app.route("/")
-    def index():
-        return HTML_PAGE
+    def do_POST(self):
+        if self.path == "/upload":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                data = json.loads(body.decode("utf-8"))
+                wav_bytes = base64.b64decode(data.get("audio", ""))
 
-    @app.route("/upload", methods=["POST"])
-    def upload():
-        if "audio" not in request.files:
-            return jsonify({"error": "No audio file"}), 400
-        audio_file = request.files["audio"]
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-            tmp_path = f.name
-        try:
-            audio_file.save(tmp_path)
-            reply = process_audio_file(tmp_path)
-            if reply == "__GOODBYE__":
-                speak("আচ্ছা, পরে দেখা হবে! বাই বাই!")
-                return jsonify({"reply": "__GOODBYE__"})
-            speak(reply)
-            return jsonify({"reply": reply})
-        except Exception as e:
-            log(f"Process error: {e}", "ERR")
-            return jsonify({"error": str(e)}), 500
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+                    tmp = f.name
+                    f.write(wav_bytes)
 
-    return app
+                try:
+                    r = sr.Recognizer()
+                    with sr.AudioFile(tmp) as src:
+                        audio = r.record(src)
+                    try:
+                        text = r.recognize_google(audio, language="bn-BD").lower().strip()
+                    except:
+                        text = r.recognize_google(audio, language="en-US").lower().strip()
+                    log(text, "USER")
+                except Exception as e:
+                    text = ""
+                    log(f"STT error: {e}", "ERR")
+                finally:
+                    if os.path.exists(tmp): os.unlink(tmp)
+
+                if not text:
+                    reply = "আমি শুনতে পাইনি! আরেকটু জোরে বলো!"
+                else:
+                    rest = text
+                    for w in WAKE_WORDS:
+                        if w in text:
+                            idx = text.index(w) + len(w)
+                            rest = text[idx:].strip().lstrip(" ,!?।")
+                            break
+                    if not rest:
+                        reply = "হুম, বলো!"
+                    elif any(w in rest for w in GOODBYE_WORDS):
+                        reply = "__GOODBYE__"
+                    elif any(w in rest for w in SEARCH_YOUTUBE):
+                        q = rest
+                        for w in SEARCH_YOUTUBE + ["search", "সার্চ", "খুঁজ"]: q = q.replace(w, "")
+                        q = q.strip()
+                        if q:
+                            webbrowser.open(f"https://www.youtube.com/results?search_query={q}")
+                            reply = f"ইউটিউবে {q} খুঁজছি!"
+                        else: reply = "কী খুঁজবি বলো!"
+                    elif any(w in rest for w in SEARCH_GOOGLE):
+                        q = rest
+                        for w in SEARCH_GOOGLE + ["search", "সার্চ", "খুঁজ"]: q = q.replace(w, "")
+                        q = q.strip()
+                        if q:
+                            webbrowser.open(f"https://www.google.com/search?q={q}")
+                            reply = f"গুগলে {q} খুঁজছি!"
+                        else: reply = "কী খুঁজবি বলো!"
+                    else:
+                        reply = get_reply(rest)
+
+                if reply != "__GOODBYE__":
+                    speak(reply)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"reply": reply}).encode("utf-8"))
+            except Exception as e:
+                log(f"Upload error: {e}", "ERR")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+    def log_message(self, format, *args):
+        pass
 
 
-# ====== FIND LOCAL IP ======
-def get_local_ip():
+def get_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
-        s.close()
-        return ip
     except:
-        return "127.0.0.1"
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
 
 
-# ====== MAIN ======
 def main():
-    if not HAS_FLASK:
-        print("=" * 50)
-        print("Flask is required! Install it:")
-        print("  pip install flask flask-cors")
-        print("=" * 50)
-        sys.exit(1)
-
-    ip = get_local_ip()
+    ip = get_ip()
     port = 5050
     print()
     print("=" * 55)
-    print("  🎤 IRA PHONE MIC SERVER")
+    print("          IRA PHONE MIC SERVER")
     print("=" * 55)
-    print(f"  📡 Open on your phone browser:")
-    print(f"  🌐  http://{ip}:{port}")
+    print(f"  Open on your phone browser:")
+    print(f"  >>>  http://{ip}:{port}  <<<")
     print()
-    print(f"  📱 Make sure phone & PC are on the SAME WiFi!")
+    print(f"  [i] Phone & PC must be on the same WiFi")
+    print(f"  [i] If no sound on PC, check Windows volume")
     print("=" * 55)
     print()
 
-    app = create_app()
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nServer stopped.")
+        server.server_close()
 
 
 if __name__ == "__main__":
