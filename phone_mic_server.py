@@ -8,7 +8,6 @@ import pygame
 import asyncio
 from datetime import datetime
 
-load_env = lambda: [exec(open(".env").read())] if os.path.exists(".env") else None
 
 def load_env():
     if os.path.exists(".env"):
@@ -96,28 +95,76 @@ h1{color:#0f0;font-size:24px;margin:5px}
 <div class="reply" id="reply"></div>
 <script>
 const btn=document.getElementById('btn'),st=document.getElementById('status'),rp=document.getElementById('reply'),yt=document.getElementById('youText');
-let recOn=false,recog;
-if(!('webkitSpeechRecognition'in window)&&!('SpeechRecognition'in window)){st.textContent='❌ Use Chrome browser!';btn.disabled=true}else{
-const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-recog=new SR();recog.continuous=false;recog.interimResults=true;recog.lang='bn-BD';
-recog.onresult=function(e){
-let final='';
-for(let i=e.resultIndex;i<e.results.length;i++){const t=e.results[i][0].transcript;if(e.results[i].isFinal)final+=t;else st.textContent='🔵 '+t}
-if(final){
-recOn=false;btn.classList.remove('active');btn.textContent='🎤';
-st.textContent='⏳ Sending...';yt.textContent='🗣️ '+final;
-fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:final})})
-.then(r=>r.json()).then(d=>{
-if(d.reply==='__GOODBYE__'){st.textContent='😴 Bye!';rp.textContent='😴 Goodbye!';rp.className='reply show';return}
-st.textContent='💬 Ira replied!';rp.textContent='🤖 '+d.reply;rp.className='reply show'
-}).catch(e=>{st.textContent='❌ Error!';rp.textContent='❌ '+e.message;rp.className='reply show'})
-}};
-recog.onerror=function(){recOn=false;btn.classList.remove('active');btn.textContent='🎤';st.textContent='❌ Error. Tap 🎤 again'};
-recog.onend=function(){recOn=false;btn.classList.remove('active');btn.textContent='🎤';if(st.textContent.startsWith('🔵'))st.textContent='Tap 🎤 and speak'};
+let recOn=false,recog,permGranted=false;
+
+// Step 1: Check browser support
+if(!('webkitSpeechRecognition'in window)&&!('SpeechRecognition'in window)){
+    st.textContent='❌ Chrome browser use koro!';btn.disabled=true;
+}else{
+    // Step 2: Request mic permission FIRST (before using speech recognition)
+    async function requestMic(){
+        try{
+            st.textContent='⏳ Mic permission chaitesi...';
+            const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+            stream.getTracks().forEach(t=>t.stop());
+            permGranted=true;
+            st.textContent='✅ Mic ready! Tap 🎤 and speak';
+            btn.disabled=false;
+        }catch(e){
+            st.textContent='❌ Mic permission denied! Browser settings e allow koro';
+            btn.disabled=true;
+        }
+    }
+    requestMic();
+    
+    // Step 3: Setup speech recognition
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    recog=new SR();
+    recog.continuous=false;
+    recog.interimResults=true;
+    recog.lang='bn-BD';
+    
+    recog.onresult=function(e){
+        let final='';
+        for(let i=e.resultIndex;i<e.results.length;i++){
+            const t=e.results[i][0].transcript;
+            if(e.results[i].isFinal)final+=t;
+            else st.textContent='🔵 '+t;
+        }
+        if(final){
+            recOn=false;btn.classList.remove('active');btn.textContent='🎤';
+            st.textContent='⏳ Sending...';yt.textContent='🗣️ '+final;
+            fetch('/chat',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({text:final})
+            }).then(r=>r.json()).then(d=>{
+                if(d.reply==='__GOODBYE__'){st.textContent='😴 Bye!';rp.textContent='😴 Ira: goodbye!';rp.className='reply show';return}
+                st.textContent='💬 Ira replied!';rp.textContent='🤖 '+d.reply;rp.className='reply show'
+            }).catch(e=>{st.textContent='❌ Connection error';rp.textContent=e.message;rp.className='reply show'})
+        }
+    };
+    recog.onerror=function(e){
+        recOn=false;btn.classList.remove('active');btn.textContent='🎤';
+        if(e.error==='not-allowed')st.textContent='❌ Permission denied. Browser settings e allow koro';
+        else st.textContent='❌ Error. Tap 🎤 again';
+    };
+    recog.onend=function(){
+        recOn=false;btn.classList.remove('active');btn.textContent='🎤';
+        if(st.textContent.startsWith('🔵'))st.textContent='Tap 🎤 and speak';
+    };
 }
+
 btn.onclick=function(){
-if(recOn){recog.stop();recOn=false;btn.classList.remove('active');btn.textContent='🎤';st.textContent='Stopped';return}
-if(recog){recog.start();recOn=true;btn.classList.add('active');btn.textContent='⏹';st.textContent='🔴 Speak now!';rp.className='reply'}
+    if(!permGranted){st.textContent='⏳ Mic permission lagbe...';requestMic();return}
+    if(recOn){
+        recog.stop();recOn=false;btn.classList.remove('active');btn.textContent='🎤';
+        st.textContent='Stopped. Tap 🎤 again';return;
+    }
+    if(recog){
+        recog.start();recOn=true;btn.classList.add('active');btn.textContent='⏹';
+        st.textContent='🔴 Speak now!';rp.className='reply';
+    }
 };
 </script></body></html>"""
 
