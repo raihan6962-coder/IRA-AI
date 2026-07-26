@@ -117,42 +117,54 @@ if(!('webkitSpeechRecognition'in window)&&!('SpeechRecognition'in window)){
     }
     requestMic();
     
-    // Step 3: Setup speech recognition
-    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-    recog=new SR();
-    recog.continuous=false;
-    recog.interimResults=true;
-    recog.lang='bn-BD';
+    // Step 3: Setup speech recognition with fallback languages
+    const langs=['bn-BD','bn-IN','bn','en-US'];
+    let langIdx=0;
     
-    recog.onresult=function(e){
-        let final='';
-        for(let i=e.resultIndex;i<e.results.length;i++){
-            const t=e.results[i][0].transcript;
-            if(e.results[i].isFinal)final+=t;
-            else st.textContent='🔵 '+t;
-        }
-        if(final){
+    function setupRecog(){
+        const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+        recog=new SR();
+        recog.continuous=false;
+        recog.interimResults=true;
+        recog.lang=langs[langIdx];
+        st.textContent='🧠 Language: '+recog.lang;
+        
+        recog.onresult=function(e){
+            let final='';
+            for(let i=e.resultIndex;i<e.results.length;i++){
+                const t=e.results[i][0].transcript;
+                if(e.results[i].isFinal)final+=t;
+                else st.textContent='🔵 '+t;
+            }
+            if(final){
+                recOn=false;btn.classList.remove('active');btn.textContent='🎤';
+                st.textContent='⏳ Sending...';yt.textContent='🗣️ '+final;
+                fetch('/chat',{
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({text:final})
+                }).then(r=>r.json()).then(d=>{
+                    if(d.reply==='__GOODBYE__'){st.textContent='😴 Bye!';rp.textContent='😴 Ira: goodbye!';rp.className='reply show';return}
+                    st.textContent='💬 Ira replied!';rp.textContent='🤖 '+d.reply;rp.className='reply show'
+                }).catch(e=>{st.textContent='❌ Connection error';rp.textContent=e.message;rp.className='reply show'})
+            }
+        };
+        recog.onerror=function(e){
             recOn=false;btn.classList.remove('active');btn.textContent='🎤';
-            st.textContent='⏳ Sending...';yt.textContent='🗣️ '+final;
-            fetch('/chat',{
-                method:'POST',
-                headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({text:final})
-            }).then(r=>r.json()).then(d=>{
-                if(d.reply==='__GOODBYE__'){st.textContent='😴 Bye!';rp.textContent='😴 Ira: goodbye!';rp.className='reply show';return}
-                st.textContent='💬 Ira replied!';rp.textContent='🤖 '+d.reply;rp.className='reply show'
-            }).catch(e=>{st.textContent='❌ Connection error';rp.textContent=e.message;rp.className='reply show'})
-        }
-    };
-    recog.onerror=function(e){
-        recOn=false;btn.classList.remove('active');btn.textContent='🎤';
-        if(e.error==='not-allowed')st.textContent='❌ Permission denied. Browser settings e allow koro';
-        else st.textContent='❌ Error. Tap 🎤 again';
-    };
-    recog.onend=function(){
-        recOn=false;btn.classList.remove('active');btn.textContent='🎤';
-        if(st.textContent.startsWith('🔵'))st.textContent='Tap 🎤 and speak';
-    };
+            if(e.error==='not-allowed')st.textContent='❌ Mic allow koro browser settings e';
+            else if(e.error==='language-not-supported'||e.error==='bad-grammar'){
+                langIdx++;
+                if(langIdx<langs.length){
+                    st.textContent='🔄 Trying '+langs[langIdx]+'...';
+                    setupRecog();
+                }else st.textContent='❌ Language not supported';
+            }else st.textContent='❌ '+e.error+'. Tap again';
+        };
+        recog.onend=function(){
+            recOn=false;btn.classList.remove('active');btn.textContent='🎤';
+        };
+    }
+    setupRecog();
 }
 
 btn.onclick=function(){
