@@ -1,6 +1,6 @@
 """Ira Phone Mic - Record audio on phone, PC does speech recognition"""
 
-import os, sys, json, socket, tempfile, webbrowser, base64, struct
+import os, sys, json, socket, tempfile, webbrowser, base64, struct, subprocess, shutil
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from groq import Groq
 import speech_recognition as sr
@@ -81,17 +81,17 @@ h1{color:#0f0;font-size:24px}
 <div class="reply" id="reply"></div>
 <script>
 const btn=document.getElementById('btn'),st=document.getElementById('status'),rp=document.getElementById('reply');
-let audioCtx=null,samples=[],recording=false,timerId=null;
+let audioCtx=null,stream=null,samples=[],recording=false,srcNode=null,procNode=null;
 
-// Request mic permission on page load
+// Request mic permission ONCE on page load - keep stream alive
 async function init(){
     try{
-        const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
-        stream.getTracks().forEach(t=>t.stop());
-        st.textContent='✅ Ready! Tap 🎤 to start recording';
+        stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+        audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+        st.textContent='✅ Tap 🎤 to start recording';
         btn.disabled=false;
     }catch(e){
-        st.textContent='❌ Mic permission deny koro browser settings e';
+        st.textContent='❌ Mic allow koro browser settings e';
         btn.disabled=true;
     }
 }
@@ -100,29 +100,31 @@ init();
 btn.addEventListener('click',toggleRec);
 
 function toggleRec(){
-    if(!recording){startRec();}
-    else{stopRec();}
+    if(recording){stopRec();}
+    else{startRec();}
 }
 
-async function startRec(){
-    if(recording)return;
+function startRec(){
+    if(recording||!stream)return;
     samples=[];
+    // Use MediaRecorder (more reliable on mobile)
     try{
-        const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
-        if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-        const src=audioCtx.createMediaStreamSource(stream);
-        const node=audioCtx.createScriptProcessor(4096,1,1);
-        node.onaudioprocess=function(e){
-            const ch=e.inputBuffer.getChannelData(0);
-            for(let i=0;i<ch.length;i++)samples.push(ch[i]);
+        const mediaRec=new MediaRecorder(stream,{mimeType:'audio/webm'});
+        mediaRec.ondataavailable=function(e){
+            if(e.data.size>0)samples.push(e.data);
         };
-        src.connect(node);node.connect(audioCtx.destination);
+        mediaRec.onstop=function(){
+            const blob=new Blob(samples,{type:'audio/webm'});
+            sendAudio(blob);
+        };
+        window._mediaRec=mediaRec;
+        mediaRec.start(100);
         recording=true;
         btn.classList.add('recording');
         btn.textContent='⏹';
         st.textContent='🔴 Recording... tap ⏹ to stop';
     }catch(e){
-        st.textContent='❌ Mic error. Browser settings e allow koro';
+        st.textContent='❌ Mic error: '+e.message;
     }
 }
 
@@ -131,31 +133,30 @@ function stopRec(){
     recording=false;
     btn.classList.remove('recording');
     btn.textContent='🎤';
-    st.textContent='⏳ Sending...';
-    
-    if(samples.length<1000){
+    if(window._mediaRec&&window._mediaRec.state!=='inactive'){
+        window._mediaRec.stop();
+    }else{
         st.textContent='✅ Tap 🎤 and speak';
-        return;
     }
-    
-    // Encode as WAV and send
-    const sr=audioCtx?audioCtx.sampleRate:16000;
-    const wavBytes=encodeWAV(samples,sr);
+}
+
+function sendAudio(blob){
+    st.textContent='⏳ Sending...';
     const reader=new FileReader();
     reader.onload=function(){
         const b64=reader.result.split(',')[1];
         fetch('/upload',{
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({audio:b64})
+            body:JSON.stringify({audio:b64,format:'webm'})
         }).then(r=>r.json()).then(d=>{
             if(d.reply==='__GOODBYE__'){st.textContent='😴 Bye!';rp.textContent='😴 Ira: goodbye!';rp.className='reply show';return}
             st.textContent='💬 Ira replied!';rp.textContent='🤖 '+d.reply;rp.className='reply show'
         }).catch(e=>{
-            st.textContent='❌ Connection error';rp.textContent='❌ Check PC is running';rp.className='reply show'
+            st.textContent='❌ Connection error';rp.textContent='❌ Check PC';rp.className='reply show'
         })
     };
-    reader.readAsDataURL(wavBytes);
+    reader.readAsDataURL(blob);
 }
 
 function encodeWAV(samples,sr){
@@ -189,8 +190,37 @@ class Handler(BaseHTTPRequestHandler):
                 wav_b64=d.get("audio","")
                 wav_bytes=base64.b64decode(wav_b64)
                 
-                with tempfile.NamedTemporaryFile(delete=False,suffix=".wav") as f:
+                fmt=d.get("format","wav")
+                
+                with tempfile.NamedTemporaryFile(delete=False,suffix="."+fmt) as f:
                     tmp=f.name; f.write(wav_bytes)
+                
+                if fmt=="webm":
+                    wav_tmp=tmp.replace("."+fmt,".wav")
+                    converted=False
+                    # Try ffmpeg
+                    if shutil.which("ffmpeg"):
+                        subprocess.run(["ffmpeg","-i",tmp,"-acodec","pcm_s16le","-ar","16000","-ac","1",wav_tmp,"-y"],capture_output=True,timeout=10)
+                        if os.path.exists(wav_tmp): converted=True
+                    # Try pydub
+                    if not converted:
+                        try:
+                            from pydub import AudioSegment
+                            AudioSegment.from_file(tmp).export(wav_tmp,format="wav")
+                            converted=True
+                        except: pass
+                    if converted:
+                        os.unlink(tmp)
+                        tmp=wav_tmp
+                    else:
+                        os.unlink(tmp)
+                        reply="❌ PC te ffmpeg install nei। `winget install ffmpeg` diye install koro"
+                        self.send_response(200)
+                        self.send_header("Content-Type","application/json")
+                        self.send_header("Access-Control-Allow-Origin","*")
+                        self.end_headers()
+                        self.wfile.write(json.dumps({"reply":reply}).encode("utf-8"))
+                        return
                 
                 r=sr.Recognizer()
                 try:
