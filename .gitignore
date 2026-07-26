@@ -1,5 +1,6 @@
-@pycache__
 __pycache__/
 *.pyc
 *.mp3
 .env
+ira_memory.json
+ira_log.txt
