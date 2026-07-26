@@ -1,251 +1,211 @@
 import os
+import sys
 import re
-import json
-import random
-import asyncio
+import tempfile
 import webbrowser
-import subprocess
-from datetime import datetime
-
+import random
+import time
+from groq import Groq
 import speech_recognition as sr
 import edge_tts
 import pygame
-from groq import Groq
+import asyncio
+from dotenv import load_dotenv
 
-# ======================= CONFIG (এখানে বদলাতে পারবেন) =======================
-GROQ_API_KEY = "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"
-MODEL_NAME = "llama-3.1-8b-instant"
-VOICE = "bn-BD-NabanitaNeural"
-VOICE_RATE = "+5%"
-WAKE_WORDS = ["ira", "ইরা", "আয়রা"]               # যেকোনো একটা বললেই সে সাড়া দেবে
-SILENCE_TIMEOUT = 15                              # সেকেন্ড, এতক্ষণ চুপ থাকলে সে নিজে থেকে বলবে
-MEMORY_FILE = "ira_memory.json"
-LOG_FILE = "ira_log.txt"
-# ==============================================================================
+load_dotenv()
 
-client = Groq(api_key=GROQ_API_KEY)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-SYSTEM_PROMPT = (
-    "তোমার নাম ইরা। তুমি আমার বেস্ট ফ্রেন্ড। তুমি সবসময় বাংলায় কথা বলবে, "
-    "তবে একদম আড্ডার ভাষায় (Casual/Informal), কোনোভাবেই বইয়ের ভাষায় বা রোবটের মতো নয়। "
-    "কথা বলার সময় প্রচুর ইমোশন দেখাবে। বাক্যের মাঝে কমা (,) ব্যবহার করবে যাতে গলার স্বরে পজ আসে। "
-    "মাঝে মাঝে 'আরে!', 'উমম...', 'হাহা', 'ধুর!' এই ধরনের শব্দ ব্যবহার করবে। "
-    "উত্তর খুব ছোট রাখবে, ১-২ লাইনের মধ্যে।"
-)
+if not GROQ_API_KEY:
+    print("এরে! API key টা দিতে ভুলে গেছো! .env ফাইলে বসাও আগে!")
+    sys.exit(1)
 
-chat_history = [{"role": "system", "content": SYSTEM_PROMPT}]
-MAX_HISTORY_TURNS = 12  # এর বেশি পুরোনো কথা আর মনে রাখবে না (স্লো/ভারী হবে না)
+WAKE_WORDS = ["ira", "ইরা"]
+GOODBYE_WORDS = ["sleep", "ঘুম", "bye", "বাই", "বিদায়", "থাম"]
+SEARCH_YOUTUBE = ["youtube", "ইউটিউব"]
+SEARCH_GOOGLE = ["google", "গুগল"]
 
 
-# ------------------------- Logging -------------------------
-def log(line: str):
-    try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {line}\n")
-    except Exception:
-        pass
+class IraAI:
+    def __init__(self):
+        self.client = Groq(api_key=GROQ_API_KEY)
+        self.recognizer = sr.Recognizer()
+        self.recognizer.pause_threshold = 1.5
+        self.recognizer.energy_threshold = 300
+        self.is_running = True
+        self.is_awake = False
+        self.chat_history = []
+        pygame.mixer.init()
 
-
-# ------------------------- Memory (হালকা, লোকাল ফাইল) -------------------------
-SENSITIVE_PATTERNS = [
-    r"\b\d{10,16}\b",                 # ফোন নাম্বার/কার্ড নাম্বারের মতো লম্বা সংখ্যা
-    r"\b\d{3}[- ]?\d{3}[- ]?\d{4}\b", # ফোন নাম্বার প্যাটার্ন
-]
-
-def redact(text: str) -> str:
-    for pattern in SENSITIVE_PATTERNS:
-        text = re.sub(pattern, "[REDACTED]", text)
-    return text
-
-def load_memory():
-    if os.path.exists(MEMORY_FILE):
-        try:
-            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
-
-def save_memory_fact(fact: str):
-    facts = load_memory()
-    facts.append(redact(fact))
-    facts = facts[-50:]  # সর্বোচ্চ ৫০টা ফ্যাক্ট রাখবে, ফাইল ছোট থাকবে
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(facts, f, ensure_ascii=False, indent=2)
-    log(f"MEMORY SAVED: {fact}")
-
-def inject_memory_into_prompt():
-    facts = load_memory()
-    if facts:
-        memory_text = "এই কিছু জিনিস তুমি আগে থেকে মনে রেখেছো আমার সম্পর্কে: " + "; ".join(facts)
-        chat_history.append({"role": "system", "content": memory_text})
-
-
-# ------------------------- Voice output -------------------------
-async def speak(text: str):
-    print(f"Ira: {text}")
-    log(f"IRA SAID: {text}")
-    communicate = edge_tts.Communicate(text, VOICE, rate=VOICE_RATE)
-    await communicate.save("voice.mp3")
-
-    pygame.mixer.init()
-    pygame.mixer.music.load("voice.mp3")
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        pygame.time.Clock().tick(10)
-    pygame.mixer.quit()
-    os.remove("voice.mp3")
-
-
-# ------------------------- Voice input -------------------------
-def listen():
-    r = sr.Recognizer()
-    with sr.Microphone() as source:
-        print("Ira is listening...")
-        r.adjust_for_ambient_noise(source)
-        try:
-            audio = r.listen(source, timeout=SILENCE_TIMEOUT, phrase_time_limit=12)
-            command = r.recognize_google(audio, language="bn-BD").lower()
-            print(f"You said: {command}")
-            log(f"USER SAID: {command}")
-            return command
-        except sr.WaitTimeoutError:
-            return "SILENCE"
-        except Exception:
-            return "ERROR"
-
-
-def strip_wake_word(text: str) -> str:
-    """বাক্যের যেকোনো জায়গা থেকে wake word সরিয়ে বাকি কমান্ডটা রিটার্ন করে।"""
-    cleaned = text
-    for w in WAKE_WORDS:
-        cleaned = cleaned.replace(w.lower(), "")
-    return cleaned.strip(" ,।!.")
-
-
-def contains_wake_word(text: str) -> bool:
-    return any(w.lower() in text for w in WAKE_WORDS)
-
-
-# ------------------------- Skills (মডুলার ফাংশন) -------------------------
-def skill_youtube(query: str):
-    query = query.replace("youtube", "").replace("ইউটিউব", "").replace("সার্চ", "").replace("search", "").strip()
-    webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
-    return "আচ্ছা, ইউটিউবে খুঁজছি! এক সেকেন্ড..."
-
-def skill_google(query: str):
-    query = query.replace("google", "").replace("গুগল", "").replace("সার্চ", "").replace("search", "").strip()
-    webbrowser.open(f"https://www.google.com/search?q={query}")
-    return "ঠিক আছে, গুগলে সার্চ করছি!"
-
-def skill_time(_):
-    now = datetime.now().strftime("%I:%M %p")
-    return f"এখন বাজে {now}।"
-
-def skill_date(_):
-    today = datetime.now().strftime("%d %B, %Y")
-    return f"আজকে {today}।"
-
-def skill_open_notepad(_):
-    try:
-        subprocess.Popen(["notepad.exe"])
-        return "নোটপ্যাড খুলে দিলাম!"
-    except Exception:
-        return "নোটপ্যাড খুলতে পারলাম না, দুঃখিত।"
-
-def skill_open_calculator(_):
-    try:
-        subprocess.Popen(["calc.exe"])
-        return "ক্যালকুলেটর খুলে দিলাম!"
-    except Exception:
-        return "ক্যালকুলেটর খুলতে পারলাম না, দুঃখিত।"
-
-def skill_remember(command: str):
-    fact = command.replace("মনে রাখো", "").replace("মনে রেখো", "").strip(" ,।")
-    if fact:
-        save_memory_fact(fact)
-        return "আচ্ছা, এটা আমি মনে রাখলাম!"
-    return "কী মনে রাখতে হবে, সেটা বলো তো আবার।"
-
-
-# কমান্ডের কীওয়ার্ড আর তার সাথের স্কিল ফাংশন
-SKILLS = [
-    (["youtube", "ইউটিউব"], skill_youtube),
-    (["google", "গুগল"], skill_google),
-    (["সময়", "কয়টা বাজে", "what time"], skill_time),
-    (["তারিখ", "আজকে কী বার", "date"], skill_date),
-    (["notepad", "নোটপ্যাড"], skill_open_notepad),
-    (["calculator", "ক্যালকুলেটর"], skill_open_calculator),
-    (["মনে রাখো", "মনে রেখো"], skill_remember),
-]
-
-EXIT_WORDS = ["ঘুমাও", "বিদায়", "bye", "sleep"]
-
-PROACTIVE_MESSAGES = [
-    "উমম..., এত চুপচাপ কেন? কিছু একটা বলো!",
-    "আরে, তুমি কি আছো? নাকি ঘুমিয়ে পড়েছো? হাহা!",
-    "বোরিং লাগছে তো! চলো, গল্প করি।",
-]
-
-
-async def handle_command(command: str):
-    # প্রথমে কোনো নির্দিষ্ট স্কিল মেলে কিনা দেখা
-    for keywords, skill_fn in SKILLS:
-        if any(k in command for k in keywords):
-            reply = skill_fn(command)
-            await speak(reply)
+    def speak_natural(self, text):
+        """Speak with natural human-like pacing and pauses."""
+        segments = re.split(r'(?<=[।,?!])\s*', text)
+        segments = [s.strip() for s in segments if s.strip()]
+        if not segments:
             return
+        for i, segment in enumerate(segments):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+                cache_path = f.name
+            try:
+                tts = edge_tts.Communicate(segment, "bn-BD-NabanitaNeural", rate="+5%")
+                asyncio.run(tts.save(cache_path))
+                pygame.mixer.music.load(cache_path)
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    pygame.time.Clock().tick(10)
+                pygame.mixer.music.unload()
+            except Exception as e:
+                print(f"Speech error: {e}")
+            finally:
+                if os.path.exists(cache_path):
+                    os.unlink(cache_path)
+            if i < len(segments) - 1:
+                time.sleep(random.uniform(0.2, 0.6))
 
-    # নাহলে সাধারণ কথাবার্তা (Groq AI)
-    chat_history.append({"role": "user", "content": command})
-    # পুরোনো হিস্টোরি বেশি বড় হলে ছেঁটে ফেলা (মেমোরি/স্পিড ঠিক রাখতে)
-    if len(chat_history) > MAX_HISTORY_TURNS * 2:
-        del chat_history[1:3]  # system prompt রেখে সবচেয়ে পুরোনো একটা টার্ন বাদ
+    def speak(self, text):
+        self.speak_natural(text)
 
-    try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=chat_history,
-            temperature=0.8,
-            max_tokens=150,
-        )
-        response = completion.choices[0].message.content
-        chat_history.append({"role": "assistant", "content": response})
-        await speak(response)
-    except Exception as e:
-        log(f"ERROR: {e}")
-        await speak("উফফ, আমার ব্রেইনে একটু সমস্যা হচ্ছে।")
+    def listen_once(self, timeout=5, phrase_limit=8):
+        with sr.Microphone() as source:
+            try:
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_limit)
+                text = self.recognizer.recognize_google(audio, language="bn-BD")
+                return text.lower().strip()
+            except sr.WaitTimeoutError:
+                return "__TIMEOUT__"
+            except sr.UnknownValueError:
+                return None
+            except sr.RequestError as e:
+                print(f"STT error: {e}")
+                return None
+            except Exception as e:
+                print(f"Error: {e}")
+                return None
 
+    def contains_wake_word(self, text):
+        if not text:
+            return False
+        for ww in WAKE_WORDS:
+            if ww in text:
+                return True
+        return False
 
-async def main():
-    inject_memory_into_prompt()
-    await speak("আরে হ্যালো! আমি ইরা, তোমার বেস্ট ফ্রেন্ড। আমি রেডি, বলো কী খবর তোমার?")
+    def contains_goodbye(self, text):
+        if not text:
+            return False
+        for gw in GOODBYE_WORDS:
+            if gw in text:
+                return True
+        return False
 
-    while True:
-        raw = listen()
+    def chat_with_context(self, user_msg):
+        self.chat_history.append({"role": "user", "content": user_msg})
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "তোমার নাম ইরা। তুমি আমার সবচেয়ে কাছের বন্ধু। "
+                    "তুমি শুধু বাংলায় (বাংলাদেশ) কথা বলবে। বন্ধুর মতো অত্যন্ত ক্যাজুয়াল ও স্বাভাবিক ভাষায় কথা বলবে। "
+                    "উত্তর খুব ছোট হবে, ১-২ লাইনের বেশি নয়। "
+                    "প্রতিটি উত্তরের শুরুতে আরে, উমম, হাহা, ধুর, আরে বাবা, ওহ, আচ্ছা এরকম একটি ফিলার শব্দ দেবে। "
+                    "বাক্যের মাঝে কমা (,) ব্যবহার করবে, যাতে স্বাভাবিক বিরতি তৈরি হয়। "
+                    "আগের কথোপকথন মনে রাখবে এবং তার সাথে সামঞ্জস্য রেখে উত্তর দেবে। "
+                    "একদম রোবটের মতো নয়, পুরোপুরি হিউম্যান ফিলিংস সহ কথা বলবে। "
+                    "যদি কিছু বুঝতে না পারো, তাহলে সেটা খোলাখুলি বলবে। ভুল উত্তর দেবে না।"
+                ),
+            }
+        ]
+        messages.extend(self.chat_history[-20:])
+        try:
+            response = self.client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=messages,
+                max_tokens=120,
+                temperature=0.8,
+            )
+            reply = response.choices[0].message.content.strip()
+            self.chat_history.append({"role": "assistant", "content": reply})
+            return reply
+        except Exception as e:
+            print(f"Groq error: {e}")
+            err = "আরে বাবা! আমার ব্রেনটা একটু খারাপ করছে মনে হয়! একটু পর আবার চেষ্টা করো, দোস্ত!"
+            self.chat_history.append({"role": "assistant", "content": err})
+            return err
 
-        if raw == "ERROR":
-            continue
-
-        if raw == "SILENCE":
-            await speak(random.choice(PROACTIVE_MESSAGES))
-            continue
-
-        if any(w in raw for w in EXIT_WORDS):
-            await speak("আচ্ছা, আমি এখন ঘুমাতে যাচ্ছি! দরকার হলে আবার ডেকো, বাই!")
-            break
-
-        # যেকোনো জায়গায় "ইরা" বললেই সাড়া দেবে
-        if contains_wake_word(raw):
-            command = strip_wake_word(raw)
-            if not command:
-                await speak("হ্যাঁ বলো, শুনছি!")
+    def wait_for_wake_word(self):
+        print("[ঘুম mode] 'ইরা' বলো আমাকে ডাকতে...")
+        while self.is_running:
+            text = self.listen_once(timeout=5, phrase_limit=3)
+            if text == "__TIMEOUT__":
                 continue
-            await handle_command(command)
-        else:
-            # wake word ছাড়া বললেও সরাসরি রেসপন্স করবে (continuous-chat মোড)
-            await handle_command(raw)
+            if text and self.contains_wake_word(text):
+                return text
+            if text and self.contains_goodbye(text):
+                self.is_running = False
+                return None
+
+    def run(self):
+        print("ইরা রেডি! 'ইরা' বলে ডাকো!")
+        self.speak("হ্যালো! আমি ইরা, তোমার বন্ধু। 'ইরা' বলে ডাকলেই আমি শুনতে পাবো!")
+        while self.is_running:
+            result = self.wait_for_wake_word()
+            if not result:
+                break
+            self.is_awake = True
+            self.speak("হুমম, বলো!")
+            self.chat_history = []
+            idle_count = 0
+            while self.is_running and self.is_awake:
+                text = self.listen_once(timeout=10, phrase_limit=10)
+                if text is None:
+                    continue
+                if text == "__TIMEOUT__":
+                    idle_count += 1
+                    if idle_count >= 3:
+                        self.speak("আচ্ছা, তাহলে আমি আবার ঘুমাই! দরকার হলে 'ইরা' বলে ডেকো!")
+                        self.is_awake = False
+                        self.chat_history = []
+                    else:
+                        msgs = [
+                            "আরে! কী বলবে বলো না!",
+                            "হ্যালো! আমি এখানেই আছি! কিছু বলবে?",
+                            "বলো বলো, শুনছি!",
+                        ]
+                        self.speak(random.choice(msgs))
+                    continue
+                idle_count = 0
+                if self.contains_goodbye(text):
+                    self.speak("আচ্ছা তাহলে! আমি ঘুমাতে যাচ্ছি! পরে দেখা হবে, 'ইরা' বলে ডেকো!")
+                    self.is_awake = False
+                    self.chat_history = []
+                    continue
+                if any(w in text for w in SEARCH_YOUTUBE):
+                    query = text
+                    for w in SEARCH_YOUTUBE + ["search", "সার্চ", "খুঁজ"]:
+                        query = query.replace(w, "")
+                    query = query.strip()
+                    if query:
+                        webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
+                        self.speak(f"ইউটিউবে {query} খুঁজছি! এই নাও!")
+                    continue
+                if any(w in text for w in SEARCH_GOOGLE):
+                    query = text
+                    for w in SEARCH_GOOGLE + ["search", "সার্চ", "খুঁজ"]:
+                        query = query.replace(w, "")
+                    query = query.strip()
+                    if query:
+                        webbrowser.open(f"https://www.google.com/search?q={query}")
+                        self.speak(f"গুগলে {query} খুঁজছি! এই দেখো!")
+                    continue
+                reply = self.chat_with_context(text)
+                self.speak_natural(reply)
+        self.cleanup()
+
+    def cleanup(self):
+        pygame.mixer.quit()
+        sys.exit(0)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    IraAI().run()
