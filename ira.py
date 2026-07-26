@@ -5,6 +5,7 @@ import tempfile
 import webbrowser
 import random
 import time
+import threading
 from groq import Groq
 import speech_recognition as sr
 import edge_tts
@@ -35,6 +36,52 @@ GOODBYE_WORDS = ["sleep", "ঘুম", "bye", "বাই", "বিদায়", "�
 SEARCH_YOUTUBE = ["youtube", "ইউটিউব"]
 SEARCH_GOOGLE = ["google", "গুগল"]
 
+STATUS_SLEEP = 0
+STATUS_LISTEN = 1
+STATUS_THINK = 2
+STATUS_SPEAK = 3
+
+
+class Indicator:
+    def __init__(self):
+        self.status = STATUS_SLEEP
+        self.running = True
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        pygame.display.init()
+        size = 120, 120
+        self.screen = pygame.display.set_mode(size, pygame.NOFRAME)
+        pygame.display.set_caption("Ira")
+        clock = pygame.time.Clock()
+        while self.running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.running = False
+            self.screen.fill((20, 20, 20))
+            colors = {
+                STATUS_SLEEP: (0, 255, 100),
+                STATUS_LISTEN: (0, 200, 255),
+                STATUS_THINK: (255, 200, 0),
+                STATUS_SPEAK: (255, 80, 80),
+            }
+            color = colors.get(self.status, (0, 255, 100))
+            cx, cy = 60, 60
+            r = 25
+            pygame.draw.circle(self.screen, color, (cx, cy), r)
+            pygame.draw.circle(self.screen, (255, 255, 255), (cx, cy), r, 2)
+            pygame.display.update()
+            clock.tick(30)
+        pygame.display.quit()
+
+    def set_status(self, s):
+        self.status = s
+
+    def stop(self):
+        self.running = False
+        self.thread.join(timeout=2)
+
 
 class IraAI:
     def __init__(self):
@@ -45,10 +92,11 @@ class IraAI:
         self.is_running = True
         self.is_awake = False
         self.chat_history = []
-        pygame.mixer.init()
+        pygame.mixer.init(frequency=22050, size=-16, channels=1)
+        self.indicator = Indicator()
 
     def speak_natural(self, text):
-        """Speak with natural human-like pacing and pauses."""
+        self.indicator.set_status(STATUS_SPEAK)
         segments = re.split(r'(?<=[।,?!])\s*', text)
         segments = [s.strip() for s in segments if s.strip()]
         if not segments:
@@ -76,10 +124,12 @@ class IraAI:
         self.speak_natural(text)
 
     def listen_once(self, timeout=5, phrase_limit=8):
+        self.indicator.set_status(STATUS_LISTEN)
         with sr.Microphone() as source:
             try:
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
                 audio = self.recognizer.listen(source, timeout=timeout, phrase_time_limit=phrase_limit)
+                self.indicator.set_status(STATUS_THINK)
                 text = self.recognizer.recognize_google(audio, language="bn-BD")
                 return text.lower().strip()
             except sr.WaitTimeoutError:
@@ -110,6 +160,7 @@ class IraAI:
         return False
 
     def chat_with_context(self, user_msg):
+        self.indicator.set_status(STATUS_THINK)
         self.chat_history.append({"role": "user", "content": user_msg})
         messages = [
             {
@@ -144,7 +195,7 @@ class IraAI:
             return err
 
     def wait_for_wake_word(self):
-        print("[ঘুম mode] 'ইরা' বলো আমাকে ডাকতে...")
+        self.indicator.set_status(STATUS_SLEEP)
         while self.is_running:
             text = self.listen_once(timeout=5, phrase_limit=3)
             if text == "__TIMEOUT__":
@@ -156,7 +207,6 @@ class IraAI:
                 return None
 
     def run(self):
-        print("ইরা রেডি! 'ইরা' বলে ডাকো!")
         self.speak("হ্যালো! আমি ইরা, তোমার বন্ধু। 'ইরা' বলে ডাকলেই আমি শুনতে পাবো!")
         while self.is_running:
             result = self.wait_for_wake_word()
@@ -213,6 +263,7 @@ class IraAI:
         self.cleanup()
 
     def cleanup(self):
+        self.indicator.stop()
         pygame.mixer.quit()
         sys.exit(0)
 
