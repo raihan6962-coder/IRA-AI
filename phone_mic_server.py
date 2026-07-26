@@ -1,13 +1,14 @@
-"""Ira Phone Mic Server - Auto firewall config + QR code + network test"""
+"""Ira Phone Mic - Record audio on phone, PC does speech recognition"""
 
-import os, sys, json, socket, tempfile, webbrowser, subprocess
+import os, sys, json, socket, tempfile, webbrowser, base64, struct
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from groq import Groq
+import speech_recognition as sr
+import wave
 import edge_tts
 import pygame
 import asyncio
 from datetime import datetime
-
 
 def load_env():
     if os.path.exists(".env"):
@@ -20,8 +21,7 @@ def load_env():
 
 load_env()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    print("API key not found in .env file"); sys.exit(1)
+if not GROQ_API_KEY: print("API key not found in .env file"); sys.exit(1)
 
 GOODBYE_WORDS = ["sleep","ঘুম","bye","বাই","বিদায়","থাম","stop"]
 SEARCH_YOUTUBE = ["youtube","ইউটিউব"]
@@ -41,15 +41,12 @@ def get_reply(msg):
         reply = r.choices[0].message.content.strip()
         chat_history.append({"role":"assistant","content":reply})
         return reply
-    except Exception as e:
-        log(f"Groq error: {e}","ERR")
-        return "উফ! একটু সমস্যা হচ্ছে। আবার বলো তো?"
+    except Exception as e: return "উফ! একটু সমস্যা হচ্ছে। আবার বলো তো?"
 
 def speak(text):
     log(text,"IRA")
     pygame.mixer.init(frequency=22050,size=-16,channels=1)
-    with tempfile.NamedTemporaryFile(delete=False,suffix=".mp3") as f:
-        p = f.name
+    with tempfile.NamedTemporaryFile(delete=False,suffix=".mp3") as f: p=f.name
     try:
         asyncio.run(edge_tts.Communicate(text,"bn-BD-NabanitaNeural",rate="+0%").save(p))
         pygame.mixer.music.load(p); pygame.mixer.music.play()
@@ -60,15 +57,6 @@ def speak(text):
         if os.path.exists(p): os.unlink(p)
     pygame.mixer.quit()
 
-def add_firewall_rule():
-    try:
-        r = subprocess.run(['netsh','advfirewall','firewall','show','rule','name=all'],capture_output=True,text=True,timeout=5)
-        if "Ira Phone Mic" not in r.stdout:
-            subprocess.run(['netsh','advfirewall','firewall','add','rule','name=Ira Phone Mic','dir=in','action=allow','protocol=TCP','localport=5050'],capture_output=True,timeout=5)
-            return True
-    except: pass
-    return False
-
 HTML = """<!DOCTYPE html>
 <html lang="bn">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
@@ -77,107 +65,113 @@ HTML = """<!DOCTYPE html>
 body{background:#0d0d1a;color:#fff;font-family:sans-serif;text-align:center;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px}
 .circle{width:80px;height:80px;border-radius:50%;background:radial-gradient(circle,#0f0,#060);margin:20px;animation:glow 2s infinite}
 @keyframes glow{0%{box-shadow:0 0 10px #0f0}50%{box-shadow:0 0 30px #0f0}100%{box-shadow:0 0 10px #0f0}}
-h1{color:#0f0;font-size:24px;margin:5px}
-.status{background:#1a1a2e;border-radius:12px;padding:18px;margin:10px;width:100%;max-width:360px;font-size:15px;min-height:50px}
-.btn{width:110px;height:110px;border-radius:50%;border:none;font-size:44px;cursor:pointer;margin:15px;background:#e94560;color:#fff;transition:.3s;box-shadow:0 0 20px rgba(233,69,96,.5)}
-.btn.active{background:#f00;animation:pulse .8s infinite}
-@keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.15)}100%{transform:scale(1)}}
-.you{color:#0ff;font-size:13px;margin:8px;min-height:20px}
-.reply{background:#1a1a2e;border-radius:12px;padding:15px;margin:10px;width:100%;max-width:360px;font-size:15px;line-height:1.6;display:none}
+h1{color:#0f0;font-size:24px}
+.status{background:#1a1a2e;border-radius:12px;padding:18px;margin:10px;width:100%;max-width:360px;font-size:14px;min-height:50px}
+.btn{width:120px;height:120px;border-radius:50%;border:none;font-size:50px;cursor:pointer;margin:15px;background:#e94560;color:#fff;transition:.3s;box-shadow:0 0 25px rgba(233,69,96,.5)}
+.btn.recording{background:#f00;animation:pulse .8s infinite}
+@keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.12)}100%{transform:scale(1)}}
+.reply{background:#1a1a2e;border-radius:12px;padding:15px;margin:10px;width:100%;max-width:360px;font-size:15px;line-height:1.6;display:none;min-height:40px}
 .reply.show{display:block}
 </style></head>
 <body>
 <div class="circle"></div>
-<h1>🎙️ Ira</h1>
-<div class="status" id="status">Tap 🎤 and speak</div>
-<div class="you" id="youText"></div>
+<h1>Ira</h1>
+<div class="status" id="status">🔴 Press & hold 🎤 talk, release to send</div>
 <button class="btn" id="btn">🎤</button>
 <div class="reply" id="reply"></div>
 <script>
-const btn=document.getElementById('btn'),st=document.getElementById('status'),rp=document.getElementById('reply'),yt=document.getElementById('youText');
-let recOn=false,recog,permGranted=false;
+const btn=document.getElementById('btn'),st=document.getElementById('status'),rp=document.getElementById('reply');
+let audioCtx=null,samples=[],recording=false,timerId=null;
 
-// Step 1: Check browser support
-if(!('webkitSpeechRecognition'in window)&&!('SpeechRecognition'in window)){
-    st.textContent='❌ Chrome browser use koro!';btn.disabled=true;
-}else{
-    // Step 2: Request mic permission FIRST (before using speech recognition)
-    async function requestMic(){
-        try{
-            st.textContent='⏳ Mic permission chaitesi...';
-            const stream=await navigator.mediaDevices.getUserMedia({audio:true});
-            stream.getTracks().forEach(t=>t.stop());
-            permGranted=true;
-            st.textContent='✅ Mic ready! Tap 🎤 and speak';
-            btn.disabled=false;
-        }catch(e){
-            st.textContent='❌ Mic permission denied! Browser settings e allow koro';
-            btn.disabled=true;
-        }
+// Request mic permission on page load
+async function init(){
+    try{
+        const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+        stream.getTracks().forEach(t=>t.stop());
+        st.textContent='✅ Ready! Tap 🎤 to start recording';
+        btn.disabled=false;
+    }catch(e){
+        st.textContent='❌ Mic permission deny koro browser settings e';
+        btn.disabled=true;
     }
-    requestMic();
-    
-    // Step 3: Setup speech recognition with fallback languages
-    const langs=['bn-BD','bn-IN','bn','en-US'];
-    let langIdx=0;
-    
-    function setupRecog(){
-        const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-        recog=new SR();
-        recog.continuous=false;
-        recog.interimResults=true;
-        recog.lang=langs[langIdx];
-        st.textContent='🧠 Language: '+recog.lang;
-        
-        recog.onresult=function(e){
-            let final='';
-            for(let i=e.resultIndex;i<e.results.length;i++){
-                const t=e.results[i][0].transcript;
-                if(e.results[i].isFinal)final+=t;
-                else st.textContent='🔵 '+t;
-            }
-            if(final){
-                recOn=false;btn.classList.remove('active');btn.textContent='🎤';
-                st.textContent='⏳ Sending...';yt.textContent='🗣️ '+final;
-                fetch('/chat',{
-                    method:'POST',
-                    headers:{'Content-Type':'application/json'},
-                    body:JSON.stringify({text:final})
-                }).then(r=>r.json()).then(d=>{
-                    if(d.reply==='__GOODBYE__'){st.textContent='😴 Bye!';rp.textContent='😴 Ira: goodbye!';rp.className='reply show';return}
-                    st.textContent='💬 Ira replied!';rp.textContent='🤖 '+d.reply;rp.className='reply show'
-                }).catch(e=>{st.textContent='❌ Connection error';rp.textContent=e.message;rp.className='reply show'})
-            }
-        };
-        recog.onerror=function(e){
-            recOn=false;btn.classList.remove('active');btn.textContent='🎤';
-            if(e.error==='not-allowed')st.textContent='❌ Mic allow koro browser settings e';
-            else if(e.error==='language-not-supported'||e.error==='bad-grammar'){
-                langIdx++;
-                if(langIdx<langs.length){
-                    st.textContent='🔄 Trying '+langs[langIdx]+'...';
-                    setupRecog();
-                }else st.textContent='❌ Language not supported';
-            }else st.textContent='❌ '+e.error+'. Tap again';
-        };
-        recog.onend=function(){
-            recOn=false;btn.classList.remove('active');btn.textContent='🎤';
-        };
-    }
-    setupRecog();
+}
+init();
+
+btn.addEventListener('click',toggleRec);
+
+function toggleRec(){
+    if(!recording){startRec();}
+    else{stopRec();}
 }
 
-btn.onclick=function(){
-    if(!permGranted){st.textContent='⏳ Mic permission lagbe...';requestMic();return}
-    if(recOn){
-        recog.stop();recOn=false;btn.classList.remove('active');btn.textContent='🎤';
-        st.textContent='Stopped. Tap 🎤 again';return;
+async function startRec(){
+    if(recording)return;
+    samples=[];
+    try{
+        const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}});
+        if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+        const src=audioCtx.createMediaStreamSource(stream);
+        const node=audioCtx.createScriptProcessor(4096,1,1);
+        node.onaudioprocess=function(e){
+            const ch=e.inputBuffer.getChannelData(0);
+            for(let i=0;i<ch.length;i++)samples.push(ch[i]);
+        };
+        src.connect(node);node.connect(audioCtx.destination);
+        recording=true;
+        btn.classList.add('recording');
+        btn.textContent='⏹';
+        st.textContent='🔴 Recording... tap ⏹ to stop';
+    }catch(e){
+        st.textContent='❌ Mic error. Browser settings e allow koro';
     }
-    if(recog){
-        recog.start();recOn=true;btn.classList.add('active');btn.textContent='⏹';
-        st.textContent='🔴 Speak now!';rp.className='reply';
+}
+
+function stopRec(){
+    if(!recording)return;
+    recording=false;
+    btn.classList.remove('recording');
+    btn.textContent='🎤';
+    st.textContent='⏳ Sending...';
+    
+    if(samples.length<1000){
+        st.textContent='✅ Tap 🎤 and speak';
+        return;
     }
-};
+    
+    // Encode as WAV and send
+    const sr=audioCtx?audioCtx.sampleRate:16000;
+    const wavBytes=encodeWAV(samples,sr);
+    const reader=new FileReader();
+    reader.onload=function(){
+        const b64=reader.result.split(',')[1];
+        fetch('/upload',{
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({audio:b64})
+        }).then(r=>r.json()).then(d=>{
+            if(d.reply==='__GOODBYE__'){st.textContent='😴 Bye!';rp.textContent='😴 Ira: goodbye!';rp.className='reply show';return}
+            st.textContent='💬 Ira replied!';rp.textContent='🤖 '+d.reply;rp.className='reply show'
+        }).catch(e=>{
+            st.textContent='❌ Connection error';rp.textContent='❌ Check PC is running';rp.className='reply show'
+        })
+    };
+    reader.readAsDataURL(wavBytes);
+}
+
+function encodeWAV(samples,sr){
+    const len=samples.length,buf=new ArrayBuffer(44+len*2),dv=new DataView(buf);
+    function wStr(o,s){for(let i=0;i<s.length;i++)dv.setUint8(o+i,s.charCodeAt(i));}
+    wStr(0,'RIFF');dv.setUint32(4,36+len*2,true);wStr(8,'WAVE');
+    wStr(12,'fmt ');dv.setUint32(16,16,true);dv.setUint16(20,1,true);
+    dv.setUint16(22,1,true);dv.setUint32(24,sr,true);dv.setUint32(28,sr*2,true);
+    dv.setUint16(32,2,true);dv.setUint16(34,16,true);wStr(36,'data');
+    dv.setUint32(40,len*2,true);
+    for(let i=0;i<len;i++){
+        const s=Math.max(-1,Math.min(1,samples[i]));
+        dv.setInt16(44+i*2,s<0?s*0x8000:s*0x7FFF,true);
+    }
+    return new Blob([buf],{type:'audio/wav'});
+}
 </script></body></html>"""
 
 class Handler(BaseHTTPRequestHandler):
@@ -185,33 +179,65 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type","text/html; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin","*")
+        self.send_header("Cache-Control","no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(HTML.encode("utf-8"))
     def do_POST(self):
-        if self.path=="/chat":
+        if self.path=="/upload":
             try:
                 d=json.loads(self.rfile.read(int(self.headers.get("Content-Length",0))))
-                text=d.get("text","").strip().lower()
-                log(text,"USER")
-                if not text: reply="বলো তো! কিছু বলোনি তো!"
-                elif any(w in text for w in GOODBYE_WORDS): reply="__GOODBYE__"
-                elif any(w in text for w in SEARCH_YOUTUBE):
-                    q = text
-                    for w in SEARCH_YOUTUBE + ["search", "সার্চ", "খুঁজ"]: q = q.replace(w, "")
-                    q = q.strip()
-                    if q: webbrowser.open(f"https://www.youtube.com/results?search_query={q}");reply=f"ইউটিউবে {q} খুঁজছি!"
-                    else: reply="কী খুঁজবি বলো!"
-                elif any(w in text for w in SEARCH_GOOGLE):
-                    q = text
-                    for w in SEARCH_GOOGLE + ["search", "সার্চ", "খুঁজ"]: q = q.replace(w, "")
-                    q = q.strip()
-                    if q: webbrowser.open(f"https://www.google.com/search?q={q}");reply=f"গুগলে {q} খুঁজছি!"
-                    else: reply="কী খুঁজবি বলো!"
-                else: reply=get_reply(text)
+                wav_b64=d.get("audio","")
+                wav_bytes=base64.b64decode(wav_b64)
+                
+                with tempfile.NamedTemporaryFile(delete=False,suffix=".wav") as f:
+                    tmp=f.name; f.write(wav_bytes)
+                
+                r=sr.Recognizer()
+                try:
+                    with sr.AudioFile(tmp) as src:
+                        audio=r.record(src)
+                    try: text=r.recognize_google(audio,language="bn-BD").lower().strip()
+                    except: text=r.recognize_google(audio,language="en-US").lower().strip()
+                    log(text,"USER")
+                except: text=""
+                finally:
+                    if os.path.exists(tmp): os.unlink(tmp)
+                
+                if not text: reply="আমি শুনতে পাইনি! আরেকটু জোরে বলো!"
+                else:
+                    rest=text
+                    for w in ["ira","ইরা","আইরা"]:
+                        if w in text: idx=text.index(w)+len(w); rest=text[idx:].strip().lstrip(" ,!?।"); break
+                    if not rest: reply="হুম, বলো!"
+                    elif any(w in rest for w in GOODBYE_WORDS): reply="__GOODBYE__"
+                    elif any(w in rest for w in SEARCH_YOUTUBE):
+                        q=rest
+                        for w in SEARCH_YOUTUBE+["search","সার্চ","খুঁজ"]: q=q.replace(w,"")
+                        q=q.strip()
+                        if q: webbrowser.open(f"https://www.youtube.com/results?search_query={q}");reply=f"ইউটিউবে {q} খুঁজছি!"
+                        else: reply="কী খুঁজবি বলো!"
+                    elif any(w in rest for w in SEARCH_GOOGLE):
+                        q=rest
+                        for w in SEARCH_GOOGLE+["search","সার্চ","খুঁজ"]: q=q.replace(w,"")
+                        q=q.strip()
+                        if q: webbrowser.open(f"https://www.google.com/search?q={q}");reply=f"গুগলে {q} খুঁজছি!"
+                        else: reply="কী খুঁজবি বলো!"
+                    else: reply=get_reply(rest)
+                
                 if reply!="__GOODBYE__": speak(reply)
-                self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Access-Control-Allow-Origin","*"); self.end_headers()
+                
+                self.send_response(200)
+                self.send_header("Content-Type","application/json")
+                self.send_header("Access-Control-Allow-Origin","*")
+                self.end_headers()
                 self.wfile.write(json.dumps({"reply":reply}).encode("utf-8"))
-            except Exception as e: log(f"Error: {e}","ERR"); self.send_response(500); self.send_header("Content-Type","application/json"); self.send_header("Access-Control-Allow-Origin","*"); self.end_headers(); self.wfile.write(json.dumps({"error":str(e)}).encode("utf-8"))
+            except Exception as e:
+                log(f"Error: {e}","ERR")
+                self.send_response(500)
+                self.send_header("Content-Type","application/json")
+                self.send_header("Access-Control-Allow-Origin","*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error":str(e)}).encode("utf-8"))
     def log_message(self,*a): pass
 
 def get_ip():
@@ -222,30 +248,19 @@ def get_ip():
 
 def main():
     ip=get_ip()
-    added=add_firewall_rule()
     print()
     print("="*55)
     print("      🎤 IRA PHONE MIC")
     print("="*55)
-    if added: print("  ✅ Firewall rule added for port 5050")
+    print(f"  🌐 {ip}:5050")
     print()
-    print(f"  📱 Open Chrome on your PHONE and type:")
-    print(f"     http://{ip}:5050")
-    print()
-    print("  ⚠️  SAME WiFi te connected kina CHECK koro!")
-    print("  ⚠️  Phone e Chrome browser use koro!")
-    print()
-    print("  🔍 Not working? Try these:")
-    print("   1. PC te Windows Firewall disable koro (temporary)")
-    print("   2. Phone WiFi te connected ki na check koro")
-    print("   3. PC te cmd -> ipconfig -> IPv4 address check koro")
-    print("   4. http://<PC_IP>:5050 phone browser e type koro")
-    print()
-    print("  ⌨️  Still not working? Just type on PC keyboard!")
+    print("  📱 Phone Chrome browser e http://{ip}:5050 open koro")
+    print("  🎤 Press & hold 🎤 -> talk -> release")
+    print("  PC will hear you and Ira will reply!")
     print("="*55)
     print()
     s=HTTPServer(("0.0.0.0",5050),Handler)
     try: s.serve_forever()
-    except KeyboardInterrupt: s.server_close();print("\nStopped.")
+    except KeyboardInterrupt: s.server_close()
 
 if __name__=="__main__": main()
